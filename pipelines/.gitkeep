@@ -1,0 +1,9 @@
+.meta/
+logs/
+plugins/
+airflow.cfg
+airflow.db
+webserver_config.py
+airflow-webserver.pid
+.ipynb_checkpoints/
+__pycache__/

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<repositories>
+  <repository>    <id>KettleFileRepository</id>
+    <name>js_datamart</name>
+    <description>js_datamart|/mnt/c/d/local-repo-pdi/js_datamart/content-pdi | C:\d\local-repo-pdi\js_datamart\content-pdi | /builds/data.eng/pdi-ci/content-pdi</description>
+    <is_default>false</is_default>
+    <base_directory>/builds/data.eng/pdi-ci/content-pdi</base_directory>
+    <read_only>N</read_only>
+    <hides_hidden_files>N</hides_hidden_files>
+  </repository>  
+</repositories>
