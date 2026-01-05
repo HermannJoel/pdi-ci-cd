@@ -13,5 +13,4 @@ content-pdi/js_datamart-configuration/config-pdi-local/
 content-pdi/file-mgmt/*
 .venv/
 .idea/
-.git/
-.github/
+#.github/

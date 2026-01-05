@@ -1,1 +1,183 @@
+name: PDI CI/CD
+
+on:
+  push:
+    branches: 
+        - main
+  pull_request:
+    branches:
+        - main
+  workflow_dispatch:
+
+env:
+  VERSION: ${{ github.ref_name }}.${{ github.run_number }}
+  LOCAL_PATH: ${{ github.workspace }}    #/home/runner/work/pdi-ci-cd/pdi-ci-cd
+  TEMP_PATH: /tmp/pdi-ci-cd/pdi-ci-cd
+  PDI_HOME: ${{ github.workspace }}/opt/pdi
+  PDI_KITCHEN: ${{ github.workspace }}/opt/pdi/data-integration/kitchen.sh
+  PDI_PAN: ${{ github.workspace }}/opt/pdi/data-integration/pan.sh
+  P_JOB_NAME: jb_main_js_datamart
+  P_PROJECT_NAME: js_datamart
+  P_WORK_UNIT_NAME: sample_ft_sales
+  p_log_level: Minimal
+  SERVER_ENV_DEV: ${{ secrets.SERVER_ENV_DEV }}
+  SERVER_ENV_TEST: ${{ secrets.SERVER_ENV_TEST }}
+  SERVER_ENV_PROD: ${{ secrets.SERVER_ENV_PROD }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rsync wget unzip python3-venv
+
+      - name: Prepare workspace
+        run: |
+          mkdir -p $TEMP_PATH
+          rsync -av --delete --exclude='.git/' ./ $TEMP_PATH/
+          mkdir -p artifacts
+          tar -czf artifacts/pdi-ci-cd.tar.gz -C /tmp/pdi-ci-cd pdi-ci-cd
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdi-ci-cd
+          path: artifacts/pdi-ci-cd.tar.gz
+          retention-days: 14
+
+  build-db:
+    permissions:
+        contents: read
+        packages: write
+    runs-on: ubuntu-latest
+    needs: sync
+    environment: dev
+    if: |
+      contains(github.event.head_commit.message, 'init-warehouse.sql') ||
+      contains(github.event.head_commit.message, 'Dockerfile')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build & push Postgres image
+        run: |
+          docker build -t ghcr.io/${{ github.repository }}/warehouse-db:${VERSION} \
+                       -t ghcr.io/${{ github.repository }}/warehouse-db:latest .
+          docker push ghcr.io/${{ github.repository }}/warehouse-db:${VERSION}
+          docker push ghcr.io/${{ github.repository }}/warehouse-db:latest
+
+  test:
+    runs-on: ubuntu-latest
+    needs: sync
+    environment: dev
+
+    services:
+      postgres:
+        image: ghcr.io/${{ github.repository }}/warehouse-db:latest
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_DB: ${{ secrets.PG_DB_NAME }}
+          POSTGRES_USER: ${{ secrets.PG_DB_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.PG_DB_PASS }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: pdi-ci-cd
+
+      - name: Install sys dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client wget unzip
+
+      - name: Wait for Postgres
+        run: |
+          until pg_isready -h localhost -U ${{ secrets.PG_DB_USER }}; do
+            echo "Waiting for DB..."
+            sleep 2
+          done
+
+      - name: Install Java 11
+        run: |
+          wget -q https://github.com/adoptium/temurin11-binaries/releases/download/jdk-11.0.17%2B8/OpenJDK11U-jdk_x64_linux_hotspot_11.0.17_8.tar.gz
+          tar -xzf OpenJDK11U-jdk_x64_linux_hotspot_11.0.17_8.tar.gz
+          mv jdk-11.0.17+8 $HOME/java11
+
+      - name: Install Pentaho PDI
+        run: |
+          mkdir -p $PDI_HOME
+          wget -q https://github.com/ambientelivre/legacy-pentaho-ce/releases/download/pdi-ce-9.3.0.0-428/pdi-ce-9.3.0.0-428.zip
+          unzip -q pdi-ce-9.3.0.0-428.zip -d $PDI_HOME
+          wget -q -P $PDI_HOME/data-integration/lib/ https://jdbc.postgresql.org/download/postgresql-42.6.0.jar
+
+      - name: Set environment
+        run: |
+          tar -xzf pdi-ci-cd.tar.gz -C /tmp
+          echo "JAVA_HOME=$HOME/java11" >> $GITHUB_ENV
+          echo "PENTAHO_JAVA_HOME=$HOME/java11" >> $GITHUB_ENV
+          echo "KETTLE_HOME=$LOCAL_PATH/content-pdi/js_datamart-configuration/${{ secrets.CONFIG_PDI }}" >> $GITHUB_ENV
+          echo "PATH=$HOME/java11/bin:$PATH" >> $GITHUB_ENV
+
+      - name: Run environment setup job
+        run: |
+          $PDI_HOME/data-integration/kitchen.sh \
+            -level=$p_log_level \
+            -file=$LOCAL_PATH/content-pdi/framework/pdi-files/developper-tools/jb_set_dev_env.kjb \
+            -param:P_JOB_NAME=$P_JOB_NAME \
+            -param:P_PROJECT_NAME=$P_PROJECT_NAME \
+            -param:P_WORK_UNIT_NAME=$P_WORK_UNIT_NAME \
+            -param:P_CONFIG=${{ secrets.CONFIG_PDI }}
+
+      - name: Run main PDI job
+        run: |
+          $PDI_HOME/data-integration/kitchen.sh \
+            -level=$p_log_level \
+            -file=$LOCAL_PATH/content-pdi/js_datamart/pdi-files/jb_main_js_datamart.kjb \
+            -param:P_JOB_NAME=$P_JOB_NAME \
+            -param:P_PROJECT_NAME=$P_PROJECT_NAME \
+            -param:P_WORK_UNIT_NAME=$P_WORK_UNIT_NAME \
+            -param:P_CONFIG=${{ secrets.CONFIG_PDI }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: test
+    environment: dev
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pdi-ci-cd
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan ${{ secrets.LOCAL_MACHINE_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to servers
+        run: |
+          for ENV in PROD TEST DEV; do
+            TARGET=$(eval echo \$SERVER_ENV_$ENV)
+            scp pdi-ci.tar.gz git@${{ secrets.LOCAL_MACHINE_IP }}:$TARGET/
+            ssh git@${{ secrets.LOCAL_MACHINE_IP }} "cd $TARGET && tar -xzf pdi-ci.tar.gz"
+          done
 
